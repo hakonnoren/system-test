@@ -179,7 +179,8 @@ private:
         float max_val = *std::max_element(_scratch.begin(), _scratch.begin() + _dimension);
 
         float range = max_val - min_val;
-        float delta = (range > 0) ? range / 255.0f : 1.0f;
+        constexpr float EPS = 1e-6f;
+        float delta = std::max(range / 255.0f, EPS);
 
         meta.l_x = min_val;
         meta.delta_x = delta;
@@ -188,7 +189,8 @@ private:
         uint32_t code_sum = 0;
         for (uint32_t i = 0; i < _dimension; ++i) {
             float normalized = (_scratch[i] - min_val) / delta;
-            int code = static_cast<int>(normalized + 0.5f);
+            int code = static_cast<int>(normalized);
+            //int code = static_cast<int>(normalized + 0.5f);
             code = std::clamp(code, 0, 255);
             codes[i] = static_cast<uint8_t>(code);
             code_sum += code;

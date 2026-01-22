@@ -11,8 +11,9 @@ search test {
       attribute: fast-search
     }
 
-    # RQ-encoded vector for Euclidean distance
-    # 128 codes + 16 bytes metadata = 144 bytes packed
+    # RQ-encoded vector with Euclidean distance
+    # (128 codes + 16 bytes metadata = 144 bytes)
+    # Distance metric is a schema-level attribute, not runtime configurable
     field vec_rq_euclidean type tensor<int8>(x[144]) {
       indexing: attribute | index | summary
       index {
@@ -26,7 +27,8 @@ search test {
       }
     }
 
-    # RQ-encoded vector for Angular distance
+    # RQ-encoded vector with Angular distance
+    # Same encoding as euclidean, different distance calculation
     field vec_rq_angular type tensor<int8>(x[144]) {
       indexing: attribute | index | summary
       index {
@@ -39,53 +41,10 @@ search test {
         distance-metric: rq_angular
       }
     }
-
-    # Original float vector for ground truth (brute force search)
-    field vec_float type tensor<float>(x[128]) {
-      indexing: attribute | summary
-    }
-
-    # Float vector with HNSW for comparison
-    field vec_float_hnsw type tensor<float>(x[128]) {
-      indexing: attribute | index | summary
-      index {
-        hnsw {
-          max-links-per-node: 16
-          neighbors-to-explore-at-insert: 500
-        }
-      }
-    }
   }
 
-  # Default rank profile for RQ Euclidean
+  # Default rank profile
   rank-profile default {
-    first-phase {
-      expression: closeness(label,nns)
-    }
-    approximate-threshold: 0.05
-    num-threads-per-search: 1
-  }
-
-  # Rank profile for RQ Angular distance
-  rank-profile rq-angular {
-    first-phase {
-      expression: closeness(label,nns)
-    }
-    approximate-threshold: 0.05
-    num-threads-per-search: 1
-  }
-
-  # Rank profile for exact float search (ground truth)
-  rank-profile float-exact {
-    first-phase {
-      expression: closeness(label,nns)
-    }
-    approximate-threshold: 0.05
-    num-threads-per-search: 1
-  }
-
-  # Rank profile for float HNSW search
-  rank-profile float-hnsw {
     first-phase {
       expression: closeness(label,nns)
     }
