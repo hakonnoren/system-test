@@ -116,7 +116,7 @@ class CommonRQBase < CommonSiftGistBase
     sd_dir = params[:sd_dir] || "rq_test"
     num_documents = params[:num_documents] || 1_000_000
     num_queries_for_recall = params[:num_queries_for_recall] || 100
-    quick = params[:quick] || false
+
 
     deploy_app(create_app(sd_dir, 0.3, 1))
     start
@@ -129,21 +129,15 @@ class CommonRQBase < CommonSiftGistBase
     # Brute force baseline for target_hits=10
     query_and_benchmark(BRUTE_FORCE, 10, 0)
 
-    if quick
-      # Quick test: just a few explore_hits values
-      [0, 100].each do |explore_hits|
-        query_and_benchmark(HNSW, 10, explore_hits)
-        calc_recall_for_queries(10, explore_hits, :doc_tensor => @doc_tensor, :query_tensor => @query_tensor)
-      end
-    else
-      # Full test suite
-      run_target_hits_10_tests
 
-      # Brute force baseline for target_hits=100
-      query_and_benchmark(BRUTE_FORCE, 100, 0)
+    # Full test suite
+    run_target_hits_10_tests
 
-      run_target_hits_100_tests
-    end
+    # Brute force baseline for target_hits=100
+    query_and_benchmark(BRUTE_FORCE, 100, 0)
+
+    run_target_hits_100_tests
+
   end
 
   # Override to ensure correct tensor names are used in recall calculation
