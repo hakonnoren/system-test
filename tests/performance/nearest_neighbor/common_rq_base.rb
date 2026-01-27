@@ -13,18 +13,21 @@ class CommonRQBase < CommonSiftGistBase
     @adminserver_tmp_bin_dir = vespa.adminserver.create_tmp_bin_dir
 
     # Compile the RQ document and query generators
+    vespa.adminserver.execute("g++ -g -O3 -std=c++20 -o #{@adminserver_tmp_bin_dir}/make_docs #{selfdir}make_docs.cpp")
     vespa.adminserver.execute("g++ -g -O3 -std=c++20 -o #{@adminserver_tmp_bin_dir}/make_rq_docs #{selfdir}make_rq_docs.cpp")
+    @container.execute("g++ -g -O3 -std=c++20 -o #{@container_tmp_bin_dir}/make_queries #{selfdir}make_queries.cpp")
     @container.execute("g++ -g -O3 -std=c++20 -o #{@container_tmp_bin_dir}/make_rq_queries #{selfdir}make_rq_queries.cpp")
   end
 
   # Override to generate RQ-encoded query vectors (needs @seed)
   def generate_vectors_for_recall(num_queries_for_recall)
-    @query_fvecs_container = nn_download_file(@query_fvecs, @container)
+    @query_fvecs_container = @dataset ? @dataset.prepare_query_fvecs(self, @container) : nn_download_file(@query_fvecs, @container)
 
     # Generate query vectors for RQ
     query_vectors_container = dirs.tmpdir + "rq_query_vectors_container.txt"
+    no_rotation_flag = @skip_rotation ? " --no-rotation" : ""
     @container.execute("#{@container_tmp_bin_dir}/make_rq_queries #{@query_fvecs_container} " +
-                       "#{@dimensions} #{num_queries_for_recall} #{@seed} --only-vectors q_rq > #{query_vectors_container}")
+                       "#{@dimensions} #{num_queries_for_recall} #{@seed} --only-vectors q_rq#{no_rotation_flag} > #{query_vectors_container}")
 
     # Copy query vectors to localhost for recall computation
     @local_query_vectors = dirs.tmpdir + "rq_query_vectors.txt"
@@ -40,19 +43,25 @@ class CommonRQBase < CommonSiftGistBase
     filter_values = params[:filter_values] || nil
 
     profiler_start
-    base_fvecs_local = nn_download_file(@base_fvecs, vespa.adminserver)
+    base_fvecs_local = @dataset ? @dataset.prepare_base_fvecs(self, vespa.adminserver) : nn_download_file(@base_fvecs, vespa.adminserver)
 
     # Generate RQ-encoded documents
+    no_rotation_flag = @skip_rotation ? " --no-rotation" : ""
     command = "#{@adminserver_tmp_bin_dir}/make_rq_docs #{base_fvecs_local} " +
               "#{@dimensions} #{operation} #{start_with_docid} " +
               "#{start_with_vector} #{start_with_vector + num_documents} " +
-              "#{@seed} #{doc_tensor}"
+              "#{@seed} #{doc_tensor}#{no_rotation_flag}"
 
     if filter_values != nil && !filter_values.empty?
       command += " [#{filter_values.join(',')}]"
     end
 
-    run_stream_feeder(command, [parameter_filler(TYPE, "feed"), parameter_filler(LABEL, label)])
+    # Add rotation indicator to label for tracking in results
+    rotation_suffix = @skip_rotation ? "-norot" : ""
+    label_with_rotation = "#{label}#{rotation_suffix}"
+
+    run_stream_feeder(command, [parameter_filler(TYPE, "feed"), parameter_filler(LABEL, label_with_rotation)], 
+                      {:client => :vespa_feed_perf})
     profiler_report("feed")
 
     print_nni_stats("test", doc_tensor)
@@ -72,15 +81,17 @@ class CommonRQBase < CommonSiftGistBase
     approximate = algorithm == HNSW ? "true" : "false"
     query_file = dirs.tmpdir + get_filename(doc_tensor, approximate, target_hits, explore_hits, filter_percent, nil)
 
+    no_rotation_flag = @skip_rotation ? " --no-rotation" : ""
     @container.execute("#{@container_tmp_bin_dir}/make_rq_queries #{@query_fvecs_container} " +
                        "#{@dimensions} #{@num_queries_for_benchmark} #{@seed} " +
                        "#{doc_tensor} #{query_tensor} #{approximate} #{target_hits} #{explore_hits} " +
-                       "#{filter_percent} > #{query_file}")
+                       "#{filter_percent}#{no_rotation_flag} > #{query_file}")
 
     puts "Generated on container: #{query_file}"
 
     slack_str = (slack == 0.0) ? "" : "-s#{slack}"
-    label = params[:label] || "#{distance_metric}-#{algorithm}-th#{target_hits}-eh#{explore_hits}-f#{filter_percent}#{slack_str}-n#{clients}-t#{threads_per_search}"
+    rotation_str = @skip_rotation ? "-norot" : ""
+    label = params[:label] || "#{distance_metric}-#{algorithm}-th#{target_hits}-eh#{explore_hits}-f#{filter_percent}#{slack_str}-n#{clients}-t#{threads_per_search}#{rotation_str}"
     result_file = dirs.tmpdir + "fbench_result.#{label}.txt"
 
     fillers = [parameter_filler(TYPE, get_type_string(filter_percent, threads_per_search)),
@@ -107,18 +118,86 @@ class CommonRQBase < CommonSiftGistBase
     @container.execute("head -10 #{result_file}")
   end
 
+  def get_rq_sd(dims, metric)
+    rq_dims = dims + 16
+    metric_short = metric.sub('rq_', '')
+    tensor_name = "vec_rq_#{metric_short}"
+
+    <<~SD
+      # Copyright Vespa.ai. All rights reserved.
+      schema test {
+        document test {
+          field id type int {
+            indexing: attribute | summary
+          }
+          field filter type array<int> {
+            indexing: attribute | summary
+            attribute: fast-search
+          }
+          field #{tensor_name} type tensor<int8>(x[#{rq_dims}]) {
+            indexing: attribute | index | summary
+            index {
+              hnsw {
+                max-links-per-node: 16
+                neighbors-to-explore-at-insert: 500
+              }
+            }
+            attribute {
+              distance-metric: #{metric}
+            }
+          }
+        }
+        rank-profile default {
+          inputs {
+            query(q_rq) tensor<int8>(x[#{rq_dims}])
+          }
+          first-phase {
+            expression: closeness(label,nns)
+          }
+          approximate-threshold: 0.05
+          num-threads-per-search: 1
+        }
+        #{[1, 2, 4, 8, 16].map { |t| "rank-profile threads-#{t} inherits default { num-threads-per-search: #{t} }" }.join("\n  ")}
+        document-summary minimal {
+          summary id {}
+        }
+      }
+SD
+  end
+
+  def create_app_from_sd_file(sd_file, concurrency = 1.0)
+    add_bundle(selfdir + "NearestNeighborRecallSearcher.java")
+    searching = Searching.new
+    searching.chain(Chain.new("default", "vespa").add(Searcher.new("ai.vespa.test.NearestNeighborRecallSearcher")))
+    app = SearchApp.new.sd(sd_file).
+      threads_per_search(1).
+      container(Container.new("combinedcontainer").
+                jvmoptions('-Xms8g -Xmx8g').
+                search(searching).
+                docproc(DocumentProcessing.new).
+                documentapi(ContainerDocumentApi.new)).
+      indexing("combinedcontainer")
+    app.tune_searchnode({:feeding => {:concurrency => concurrency}})
+    app
+  end
+
   # Main test orchestration method for RQ tests
   def run_rq_test(params = {})
-    @distance_metric = params[:distance_metric] || "rq_euclidean"
+    @distance_metric = params[:distance_metric] || (@dataset ? @dataset.metric : "rq_euclidean")
     # Map distance metric to field name (distance-metric is schema-level, not runtime)
     @doc_tensor = "vec_rq_#{@distance_metric.sub('rq_', '')}"
     @query_tensor = "q_rq"
-    sd_dir = params[:sd_dir] || "rq_test"
     num_documents = params[:num_documents] || 1_000_000
     num_queries_for_recall = params[:num_queries_for_recall] || 100
+    @skip_rotation = params[:skip_rotation] || false
 
+    # Write dynamic schema to temp file
+    sd_content = get_rq_sd(@dimensions, @distance_metric)
+    sd_file = dirs.tmpdir + "test.sd"
+    File.write(sd_file, sd_content)
 
-    deploy_app(create_app(sd_dir, 0.3, 1))
+    app = create_app_from_sd_file(sd_file)
+    deploy_app(app)
     start
 
     compile_generators

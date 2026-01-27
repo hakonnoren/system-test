@@ -132,7 +132,7 @@ std::vector<float> read_fvecs_vector(std::ifstream& is, size_t expected_dim) {
 void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog << " <vector-file> <num-dims> <num-queries> <seed> "
               << "<doc-tensor> <query-tensor> [approximate] [target-hits] [explore-hits] "
-              << "[filter-percent] [radius] [latitude] [longitude]" << std::endl;
+              << "[filter-percent] [radius] [latitude] [longitude] [--no-rotation]" << std::endl;
     std::cerr << std::endl;
     std::cerr << "Example: " << prog << " sift_query.fvecs 128 10000 42 vec_rq q_rq true 100 0" << std::endl;
     std::cerr << std::endl;
@@ -145,6 +145,7 @@ void print_usage(const char* prog) {
     std::cerr << "  approximate:   Use HNSW (true) or brute force (false)" << std::endl;
     std::cerr << "  target-hits:   Target number of hits" << std::endl;
     std::cerr << "  explore-hits:  Additional HNSW exploration" << std::endl;
+    std::cerr << "  --no-rotation: Skip random rotation step (for benchmarking)" << std::endl;
     std::cerr << std::endl;
     std::cerr << "Output: URL-encoded queries for fbench, one per line" << std::endl;
 }
@@ -184,32 +185,47 @@ int main(int argc, char **argv) {
     std::string doc_tensor = argv[5];
     std::string query_tensor = argv[6];
 
-    // Parse optional arguments
+    // Helper to check if argument is a flag
+    auto is_flag = [](const char* arg) {
+        return arg[0] == '-' && arg[1] == '-';
+    };
+
+    // Parse optional arguments (skip if they look like flags)
     bool approximate = true;
-    if (argc > 7) approximate = (std::string(argv[7]) == "true");
+    if (argc > 7 && !is_flag(argv[7])) approximate = (std::string(argv[7]) == "true");
 
     int target_hits = 100;
-    if (argc > 8) target_hits = std::stoi(argv[8]);
+    if (argc > 8 && !is_flag(argv[8])) target_hits = std::stoi(argv[8]);
 
     int explore_hits = 0;
-    if (argc > 9) explore_hits = std::stoi(argv[9]);
+    if (argc > 9 && !is_flag(argv[9])) explore_hits = std::stoi(argv[9]);
 
     int filter_percent = 0;
-    if (argc > 10) filter_percent = std::stoi(argv[10]);
+    if (argc > 10 && !is_flag(argv[10])) filter_percent = std::stoi(argv[10]);
 
     float radius = 0;
-    if (argc > 11) radius = std::stof(argv[11]);
+    if (argc > 11 && !is_flag(argv[11])) radius = std::stof(argv[11]);
 
     Interval latitude, longitude;
-    if (argc > 12) latitude = parse_interval(argv[12]);
-    if (argc > 13) longitude = parse_interval(argv[13]);
+    if (argc > 12 && !is_flag(argv[12])) latitude = parse_interval(argv[12]);
+    if (argc > 13 && !is_flag(argv[13])) longitude = parse_interval(argv[13]);
+
+    // Check for --no-rotation flag anywhere in arguments
+    bool skip_rotation = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--no-rotation") {
+            skip_rotation = true;
+            break;
+        }
+    }
 
     // Initialize
     srand(seed);
-    rq::RQEncoder encoder(dim_size, seed);
+    rq::RQEncoder encoder(dim_size, seed, skip_rotation);
 
     std::cerr << "RQ Query Generator: dim=" << dim_size << ", packed_size=" << encoder.encoded_size()
-              << ", seed=" << seed << ", queries=" << num_queries << std::endl;
+              << ", seed=" << seed << ", queries=" << num_queries
+              << ", skip_rotation=" << (skip_rotation ? "true" : "false") << std::endl;
 
     // Open input file
     std::ifstream is(vector_file, std::ifstream::binary);

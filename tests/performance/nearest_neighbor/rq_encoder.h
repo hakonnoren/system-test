@@ -18,10 +18,10 @@ namespace rq {
 // Must match the C++ distance function expectation (16 bytes, little-endian)
 
 struct RQMetadata {
-    float l_x;          // min value after rotation
+    float l_x;          // midpoint value: min + 128*delta
     float delta_x;      // quantization step size
     float norm_sq;      // squared norm of original vector
-    uint32_t code_sum;  // sum of quantized codes
+    int32_t code_sum;   // sum of quantized codes (can be negative)
 };
 
 static_assert(sizeof(RQMetadata) == 16, "RQMetadata must be 16 bytes");
@@ -131,10 +131,11 @@ private:
 
 class RQEncoder {
 public:
-    RQEncoder(uint32_t dimension, uint64_t seed)
+    RQEncoder(uint32_t dimension, uint64_t seed, bool skip_rotation = false)
         : _dimension(dimension),
           _rotation(dimension, seed),
-          _scratch(_rotation.padded_dimension())
+          _scratch(_rotation.padded_dimension()),
+          _skip_rotation(skip_rotation)
     {}
 
     // Encode a vector and write packed output [codes][metadata]
@@ -157,11 +158,13 @@ public:
 
     uint32_t dimension() const { return _dimension; }
     uint32_t encoded_size() const { return _dimension + sizeof(RQMetadata); }
+    bool skip_rotation() const { return _skip_rotation; }
 
 private:
     uint32_t _dimension;
     FastRotation _rotation;
     mutable std::vector<float> _scratch;
+    bool _skip_rotation;
 
     void rotate_and_quantize(const std::vector<float>& input, uint8_t* codes, RQMetadata& meta) const {
         // Compute original norm squared
@@ -171,8 +174,13 @@ private:
         }
         meta.norm_sq = static_cast<float>(norm_sq);
 
-        // Rotate
-        _rotation.rotate(std::span<const float>(input), std::span<float>(_scratch));
+        // Rotate (or skip rotation for benchmarking comparison)
+        if (_skip_rotation) {
+            // Copy input directly to scratch (no rotation)
+            std::copy(input.begin(), input.end(), _scratch.begin());
+        } else {
+            _rotation.rotate(std::span<const float>(input), std::span<float>(_scratch));
+        }
 
         // Find min/max of rotated vector (only first _dimension elements)
         float min_val = *std::min_element(_scratch.begin(), _scratch.begin() + _dimension);
@@ -182,18 +190,19 @@ private:
         constexpr float EPS = 1e-6f;
         float delta = std::max(range / 255.0f, EPS);
 
-        meta.l_x = min_val;
+        // For int8: l_x is the reference point such that code=-128 maps to min_val
+        // and code=+127 maps to max_val (approximately the midpoint)
+        meta.l_x = min_val + 128.0f * delta;
         meta.delta_x = delta;
 
-        // Quantize to [0, 255]
-        uint32_t code_sum = 0;
+        // Quantize to [-128, 127]
+        int32_t code_sum = 0;
         for (uint32_t i = 0; i < _dimension; ++i) {
-            float normalized = (_scratch[i] - min_val) / delta;
-            int code = static_cast<int>(normalized);
-            //int code = static_cast<int>(normalized + 0.5f);
-            code = std::clamp(code, 0, 255);
-            codes[i] = static_cast<uint8_t>(code);
-            code_sum += code;
+            float normalized = (_scratch[i] - meta.l_x) / delta;
+            int code = static_cast<int>(std::round(normalized));
+            code = std::clamp(code, -128, 127);
+            codes[i] = static_cast<uint8_t>(static_cast<int8_t>(code));  // Store as reinterpreted uint8
+            code_sum += static_cast<int8_t>(codes[i]);  // Sum as signed
         }
         meta.code_sum = code_sum;
     }

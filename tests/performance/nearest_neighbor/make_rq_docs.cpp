@@ -110,6 +110,10 @@ void print_float_vector(std::ostream& os, const std::vector<float>& vec) {
 // ============== Field name parsing ==============
 
 std::vector<std::string> parse_field_names(const std::string &str) {
+    // Skip if this looks like a flag (starts with --)
+    if (str.rfind("--", 0) == 0) {
+        return {};
+    }
     std::vector<std::string> fields;
     std::stringstream ss(str);
     std::string field;
@@ -200,7 +204,7 @@ void print_update(std::ostream& os, size_t docid,
 void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog << " <vector-file> <num-dims> <put|update> <begin-doc> "
               << "<start-vec> <end-vec> <seed> <rq-fields> [float-fields] "
-              << "[filter-values] [latitude-interval] [longitude-interval]" << std::endl;
+              << "[filter-values] [latitude-interval] [longitude-interval] [--no-rotation]" << std::endl;
     std::cerr << std::endl;
     std::cerr << "Example: " << prog << " sift_base.fvecs 128 put 0 0 1000000 42 vec_rq_euclidean,vec_rq_angular vec_float,vec_float_hnsw" << std::endl;
     std::cerr << std::endl;
@@ -216,6 +220,7 @@ void print_usage(const char* prog) {
     std::cerr << "  filter-values: Filter percentages, e.g., [10,50,90] (optional)" << std::endl;
     std::cerr << "  latitude:      Latitude interval, e.g., [-90,90] (optional)" << std::endl;
     std::cerr << "  longitude:     Longitude interval, e.g., [-180,180] (optional)" << std::endl;
+    std::cerr << "  --no-rotation: Skip random rotation step (for benchmarking)" << std::endl;
 }
 
 int main(int argc, char **argv) {
@@ -246,16 +251,26 @@ int main(int argc, char **argv) {
     if (argc > 11) latitude = parse_interval(argv[11]);
     if (argc > 12) longitude = parse_interval(argv[12]);
 
+    // Check for --no-rotation flag anywhere in arguments
+    bool skip_rotation = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--no-rotation") {
+            skip_rotation = true;
+            break;
+        }
+    }
+
     // Initialize random seed for filter/location generation
     srand(seed);
 
     // Create RQ encoder
-    rq::RQEncoder encoder(dim_size, seed);
+    rq::RQEncoder encoder(dim_size, seed, skip_rotation);
     size_t packed_size = encoder.encoded_size();  // dim + 16 bytes metadata
 
     std::cerr << "RQ Encoder: dim=" << dim_size << ", packed_size=" << packed_size
               << ", seed=" << seed << ", rq_fields=" << rq_fields.size()
-              << ", float_fields=" << float_fields.size() << std::endl;
+              << ", float_fields=" << float_fields.size()
+              << ", skip_rotation=" << (skip_rotation ? "true" : "false") << std::endl;
 
     // Open input file
     std::ifstream is(vector_file, std::ifstream::binary);

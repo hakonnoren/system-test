@@ -37,7 +37,37 @@ class CommonAnnBaseTest < PerformanceTest
 
   def nn_download_file(file_name, vespa_node)
     puts "Trying to download from NN s3: #{file_name}"
-    download_file_from_s3(file_name, vespa_node, 'nearest-neighbor')
+    nn_download_file_cached(file_name, vespa_node, 'nearest-neighbor')
+  end
+
+  # Download files to a shared cache directory that persists across test methods
+  def nn_download_file_cached(file_name, vespa_node, dir = "")
+    url = dir.empty? ? "https://data.vespa-cloud.com/tests/performance" : "https://data.vespa-cloud.com/tests/performance/#{dir}"
+    
+    # Use a shared cache directory instead of test-specific tmpdir
+    cache_dir = Environment.instance.vespa_home + "/tmp/nn-cache"
+    vespa_node.execute("mkdir -p #{cache_dir}", :exceptiononfailure => false)
+    
+    # Check if file exists in selfdir first (for local testing)
+    if File.exist?(selfdir + file_name)
+      puts "Using local file #{file_name}"
+      return selfdir + file_name
+    end
+    
+    # Use shared cache location
+    node_file = cache_dir + "/" + file_name
+    (exitcode, _) = vespa_node.execute("test -f #{node_file}", :exceptiononfailure => false, :exitcode => true)
+    if exitcode == "0"
+      puts "Using already downloaded file #{file_name} from cache"
+    else
+      puts "Downloading file #{file_name} from #{url} to cache..."
+      vespa_node.execute("mkdir -p #{File.dirname(node_file)}", :exceptiononfailure => false)
+      vespa_node.fetchfiles(:testdata_url => url,
+                            :file => file_name,
+                            :destination_file => node_file)
+      puts "Downloaded #{url}/#{file_name} to #{node_file} on host #{vespa_node.name}"
+    end
+    node_file
   end
 
   def feed_and_benchmark(feed_file, label, doc_type = "test", tensor = "vec_m16")
